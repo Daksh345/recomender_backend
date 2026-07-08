@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pandas>=2.2
+pydantic
+
+# CPU-only torch — much smaller download/image than the CUDA build.
+# Left unpinned so pip picks whatever CPU build is compatible with your
+# Python version. If this line fails on your host, install torch separately
+# first with:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

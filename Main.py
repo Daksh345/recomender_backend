@@ -157,6 +157,11 @@ class MovieOut(BaseModel):
     score: Optional[float] = None
 
 
+class NewUserRequest(BaseModel):
+    liked_titles: List[str]
+    top_k: int = 10
+
+
 @app.get("/health")
 def health():
     return {
@@ -248,6 +253,73 @@ def similar(title: str = Query(..., min_length=1), top_k: int = Query(10, ge=1, 
             )
         )
         if len(results) == top_k:
+            break
+    return results
+
+
+@app.post("/recommend/new-user", response_model=List[MovieOut])
+def recommend_new_user(req: NewUserRequest):
+    """
+    Cold-start recommendations for a brand-new user who has no trained
+    user_embedding row yet. Instead of a learned user vector, this averages
+    the (already-cached) movie-tower vectors of a few movies they say they
+    like, and scores every movie against that 'pseudo user vector'.
+    """
+    movies_df = _state["movies_df"]
+    movie_to_index = _state["movie_to_index"]
+    movieidx_to_row = _state["movieidx_to_row"]
+    all_movie_vecs = _state["all_movie_vecs"]
+    all_movie_indices = _state["all_movie_indices"]
+    index_to_movie = _state["index_to_movie"]
+    movie_id_to_title = _state["movie_id_to_title"]
+    movie_id_to_genres = _state["movie_id_to_genres"]
+
+    if not req.liked_titles:
+        raise HTTPException(status_code=400, detail="Provide at least one liked_titles entry.")
+
+    liked_ids = []
+    for t in req.liked_titles:
+        matches = movies_df[movies_df["title"].str.contains(t, case=False, na=False, regex=False)]
+        if not matches.empty:
+            liked_ids.append(int(matches.iloc[0]["movieId"]))
+
+    if not liked_ids:
+        # None of the typed titles matched anything in the catalog — fall
+        # back to popularity, same as an unknown user_id in /recommend.
+        ids = _state["popular_movie_ids"][: req.top_k]
+        return [
+            MovieOut(
+                movieId=mid,
+                title=movie_id_to_title.get(mid, str(mid)),
+                genres=movie_id_to_genres.get(mid),
+                score=None,
+            )
+            for mid in ids
+        ]
+
+    rows = [movieidx_to_row[movie_to_index[mid]] for mid in liked_ids]
+    with torch.no_grad():
+        pseudo_user_vec = all_movie_vecs[rows].mean(dim=0, keepdim=True)
+        scores = (pseudo_user_vec * all_movie_vecs).sum(dim=1)
+
+    liked_set = set(liked_ids)
+    top_scores, top_pos = torch.topk(scores, min(req.top_k + len(liked_ids), len(scores)))
+
+    results = []
+    for score, pos in zip(top_scores, top_pos):
+        idx = all_movie_indices[pos.item()]
+        mid = index_to_movie[idx]
+        if mid in liked_set:
+            continue
+        results.append(
+            MovieOut(
+                movieId=mid,
+                title=movie_id_to_title.get(mid, str(mid)),
+                genres=movie_id_to_genres.get(mid),
+                score=round(score.item(), 4),
+            )
+        )
+        if len(results) == req.top_k:
             break
     return results
 
